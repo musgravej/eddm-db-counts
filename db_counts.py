@@ -22,10 +22,13 @@ def export_final_files():
 
     # 
     print("Exporting final file")
-    qry = c.execute(("SELECT b.city, b.state, a.* "
+    qry = c.execute(("SELECT b.city , b.state , a.zipcode "
+                     ", a.crrt , sum(a.res), sum(a.pos) "
                      "FROM routes a JOIN usps_data b "
                      "ON a.zipcode = b.zipcode "
-                     "WHERE a.deleted IS NULL;"))
+                     "WHERE a.deleted IS NULL "
+                     "GROUP BY a.zipcode, a.crrt "
+                     "HAVING sum(a.res) != 0;"))
    
     with open("{}_FINAL.txt".format(g.route_report[:-4]), 'w+', newline='') as f:
         csvw = csv.DictWriter(f, ['City', 'State', 'ZIP', 'CRRT', 'RES', 'POS'],
@@ -38,6 +41,29 @@ def export_final_files():
                            'CRRT': line[3],
                            'RES': line[4],
                            'POS': line[5]})
+
+    # 
+    print("Exporting Empty Routes")
+    qry = c.execute(("SELECT b.city , b.state , a.zipcode "
+                     ", a.crrt, sum(a.res), sum(a.pos) "
+                     "FROM routes a JOIN usps_data b "
+                     "ON a.zipcode = b.zipcode "
+                     "WHERE a.deleted IS NULL "
+                     "GROUP BY a.zipcode, a.crrt "
+                     "HAVING sum(a.res) = 0;"))
+
+    with open("{}_EMPTY ROUTES.txt".format(g.route_report[:-4]), 'w+', newline='') as f:
+        csvw = csv.DictWriter(f, ['City', 'State', 'ZIP', 'CRRT', 'RES', 'POS'],
+                              delimiter='\t', quoting=csv.QUOTE_MINIMAL)
+        csvw.writeheader()
+        for line in qry:
+            csvw.writerow({'City': line[0],
+                           'State': line[1],
+                           'ZIP': line[2],
+                           'CRRT': line[3],
+                           'RES': line[4],
+                           'POS': line[5]})
+
     # 
     print("Exporting No City, State file")
     qry = c.execute(("SELECT b.city, b.state, a.* "
@@ -128,11 +154,27 @@ def append_city_state():
     qry_zips = [z[0] for z in qry_zips]
 
     for n, chunk in enumerate(chunks(qry_zips, 5)):
+        print("\tchunk {}".format(n))
         z = usps_zip_lookup(chunk)
         sql = "INSERT INTO usps_data VALUES(?, ?, ?);"
         for key, val in z.items():
             c.execute(sql, (key, val['City'], val['State']))
 
+    conn.commit()
+    conn.close()
+
+
+def delete_outside_state(state):
+    conn = sqlite3.connect('route_db.db')
+    c = conn.cursor()
+    print("Removing ZIP outside {}".format(state))
+
+    sql = ("UPDATE routes SET deleted = 1 "
+           "WHERE EXISTS ("
+           "SELECT * from usps_data "
+           "WHERE routes.zipcode = usps_data.zipcode "
+           "AND usps_data.state != ?);")
+    c.execute(sql, (state,))
     conn.commit()
     conn.close()
 
@@ -191,6 +233,7 @@ def get_dbf_counts(folder_path=None):
 def create_route_report():
     folders = [f for f in os.listdir() if os.path.isdir(f) if f[-5:].upper() != 'LISTS']
     dbfs = set()
+    print("Creating route report")
 
     with open(g.route_report, 'w+', newline='') as ofile:
         csvwriter = csv.DictWriter(ofile,['ZIP', 'CRRT', 'RES', 'POS'])
@@ -201,14 +244,20 @@ def create_route_report():
             for rec in count_recs:
                 csvwriter.writerow(rec)
 
-def main():
+def main(state, exlude_filename):
     global g
-    g = Globals('IA Routes.csv', 'Routes_to_Exclude_gtet20_20190613.csv')
+    g = Globals('{} Routes.csv'.format(state), exlude_filename)
     create_route_report()
     remove_routes()
     append_city_state()
+    delete_outside_state(state)
     export_final_files()
 
 
 if __name__ == '__main__':
-    main()
+    state = input('Enter state (ex: IA): ')
+    exclude_file = input(('Enter full filename for csv '
+                          'exclude file (ex: Routes_to_Exclude_gtet20_20190613.csv): '))
+    # state = 'KS'
+    # exclude_file = 'Routes_to_Exclude_gtet20_20190613.csv'
+    main(state, exclude_file)
